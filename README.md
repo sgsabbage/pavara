@@ -1,34 +1,24 @@
-<table>
-	<tr>
-		<td>
-			<h1>pavara</h1><br/>
-			A game insprired by the classic mac game
-		</td>
-		<td>
-			<img src="https://dl.dropbox.com/u/38430353/indra_thumb.jpg" alt="Indra by rherriman"/>
-		</td>
-	</tr>
-</table>
 
+<img src="http://croc.sdf.org/walker-sunset.png" width="720"/>
 * * *
 how to install dependencies
 ---------------------------
 
-pavara depends on [Panda3d](http://www.panda3d.org/download.php?sdk&version=1.8.0).
+The game depends on [Panda3d](http://www.panda3d.org/download.php?sdk&version=1.8.0). Panda3d installs its own version of python, but to run the map converter and other helper tools in the repo you will need python >= 2.7 installed on your system.
 
 Panda3d installer links: [Windows](http://www.panda3d.org/download/panda3d-1.8.0/Panda3D-1.8.0.exe), [Mac](http://www.panda3d.org/download/panda3d-1.8.0/Panda3D-1.8.0.dmg), [Linux (Ubuntu)](http://www.panda3d.org/download.php?platform=ubuntu&version=1.8.0&sdk).
 
 Mac users also need the [NVidia CG toolkit](https://developer.nvidia.com/cg-toolkit). Mac users may also need an [X11 Server](http://xquartz.macosforge.org/trac) if one is not installed.
 
-In Ubuntu 12.04, the `oneiric` version of Panda3d will complain about 2 unmet dependencies during installation. [Download these](http://packages.ubuntu.com/oneiric/allpackages) to install.
+In Ubuntu 12.04, the `oneiric` version of Panda3d will complain about 2 unmet dependencies during installation. Download and install the missing packages [from here](http://packages.ubuntu.com/oneiric/allpackages) and retry installation.
 
 running
 -------
 The python script `map_test.py` must be run with the `ppython` command (provided by Panda3d) inside the source directory.
 
-* Windows: open a new `cmd.exe`, `dir \Wherever\You\Saved\pavara` then `ppython map_test.py`
+* Windows: open a new `cmd.exe`, `dir \Wherever\You\Saved\the_game` then `ppython map_test.py`
 
-* Mac/Linux: open a new terminal and `cd /path/to/pavara/folder` followed by `ppython map_test.py`
+* Mac/Linux: open a new terminal and `cd /path/to/game/folder` followed by `ppython map_test.py`
 
 * * *
 roadmap
@@ -40,12 +30,9 @@ Maps
 *   **legacy map converter**
 	*   add conversion for
 		*   domes
-		*   rounded rects
 		*	fields
 		*	walldoors
-		*	goodies
 		*	teleporters
-		*	etc.
 
 ###low priority
 *	**map loading**
@@ -63,16 +50,15 @@ Graphics
 --------
 ###high priority
 *   **walking animation**
-    *   improvements
-	*	work with colliision character to stop feet on terrain
+    *   implement correct walk cycle
 
 *	**deferred shading, bloom, transparency**
-	*	point lights on everything
+	*	integrate shadows (directional higher priority than shadows from point-lights)
 
 ###low priority
 *   **updated assets**
-	*   grenade model, finalize missle/plasma
-	*   unigoody
+	*   finalize projectile models
+	*   unigoody (or placeholder)
 	*	scout
 	*	pillbox or 'autoturret'
 	*	"ball"
@@ -80,8 +66,6 @@ Graphics
 	*	guard/ufo/ai walker
 *	triangle debris when walkers scrape walls
 
-*   **shadows**
-    *   directional soft shadow mapping
 *   **particle effects**
 	*	missle/lazer trails?
 	*	environmental, e.g. precipitation?
@@ -90,6 +74,7 @@ Networking
 ----------
 ###high priority
 *   **time travelling**
+*	multiple physics simulations on the server/clients? ([discussion here](https://docs.google.com/document/d/1WPZOwmkIAJMAJXovGwdvVnahyb-7qaJY826McMYeMVo/))
 
 ###low priority
 *   **server tracking**
@@ -113,12 +98,8 @@ Logic
 *	**messages**: triggering and listening for simple events, both in XML and whatever scripting set up we use
 *	**game modes**
 	*	vanilla mode with baseline hull
-	*	custom 'loadout' mode where several 'stats' are set using a fixed number of points enable you to select one or more balanced 'skills' based on the stats ???
-		*	for example, in addition to the baseline hull
-			* **agility** - increased top speed, decreased ammo capcity and armor, additional jump(s), wall jumps, floor sliding
-			* **defensive** - increased armor, decreased speed, droppable auto-turret (pillbox), droppable mines, ???
-			* **offensive** - increased ammo capacity, decreased armor, droppable remote motion sensor beacon, tele to scout, ???
-	*	co-op firefight, maps would need hooks for enemy spawn points
+	*	custom 'loadout' mode
+	*	co-op firefight
 
 Sound
 -----
@@ -135,17 +116,13 @@ Physics (Bullet)
 -------
 ###higher priority
 *	**kinematic character controller**
-	*	improve collision detection
-	*	send messages to walker object for animation
-	*	improve leg animation and IK to terrain
-	*	vertical height adjustment/crouching for jumping
+	*	collision detection for damage and externally applied forces (explosions/weapons fire)
+	*	impulse vertical height adjustment/crouching for hitting ground from free-fall
 *	**ballistics**
-	*	grenade lobbing
+	*	grenade lobbing!
 	*	"smart" missle tracking
 	*	walker energy, cannons, shield charging
 	*	laser cannons
-		*	less energy = less shot power
-		*	add something for the opposite situation? *arcing charge shot*: if cannons at 100% power, hold down button to charge a large 'arcing' shot, which, scaling with charge time, has the effect of 'jumping' to other players within range of the player struck by the original arc shot, doing a fraction of the damage for each 'jump'. this would drain your cannons completely and overcharging (and self-destruction) would be possible. could be 'skill'
 	*	splash/freesolid/laser damage/recoil
 
 ###lower priority
@@ -157,4 +134,4 @@ User Interface
 --------------
 ###lowest priority
 *	**preliminary designs**
-*	3d target reticules
+*	3d target reticules (finalize plasma/missile, draft grenade)

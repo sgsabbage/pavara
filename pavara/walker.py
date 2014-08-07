@@ -1,13 +1,26 @@
-from panda3d.core import *
+from panda3d.core import Vec3, TransformState, rad2Deg, AmbientLight, ColorBlendAttrib, LineSegs
+from panda3d.bullet import BulletGhostNode, BulletCylinderShape, BulletConvexHullShape, BulletRigidBodyNode, YUp
 from direct.actor.Actor import Actor
-from world import *
+from direct.interval.IntervalGlobal import *
+from pavara.world import *
+from pavara.projectiles import *
 
 TOP_LEG_LENGTH = 1
 BOTTOM_LEG_LENGTH = 1.21
 TOP_LEG_EXTENDED_P = 60
 BOTTOM_LEG_EXTENDED_P = -70
 
-class Hat (object):
+MISSILE_OFFSET = [0, -.3, -.6]
+GRENADE_OFFSET = [0, .3, -.8]
+
+SIGHTS_FRIENDLY_COLOR = [14.0/255.0, 114.0/255.0, 26.0/255.0, 1]
+SIGHTS_ENEMY_COLOR = [217.0/255.0, 24.0/255.0, 24.0/255.0, 1]
+
+MIN_WALKFUNC_SIZE_FACTOR = .001
+MAX_WALKFUNC_SIZE_FACTOR = 22
+WALKFUNC_STEPS = 14
+
+class LoadedMissile (object):
 
     def __init__(self, actor, color):
         self.missile_loaded = False
@@ -15,6 +28,7 @@ class Hat (object):
         self.loaded_missile.hide()
         self.loaded_missile.reparentTo(actor)
         self.loaded_missile.set_pos(self.loaded_missile, *MISSILE_OFFSET)
+        self.loaded_missile.set_h(180)
         self.loaded_missile.set_scale(MISSILE_SCALE)
         main_engines = self.loaded_missile.find('**/mainengines')
         main_engines.set_color(.2,.2,.2)
@@ -42,7 +56,7 @@ class Hat (object):
         self.missile_loaded = False
         self.loaded_missile.hide()
 
-class Sack (object):
+class LoadedGrenade (object):
 
     def __init__(self, actor, color):
         self.grenade_loaded = False
@@ -50,6 +64,7 @@ class Sack (object):
         self.loaded_grenade.hide()
         self.loaded_grenade.reparentTo(actor)
         self.loaded_grenade.set_pos(self.loaded_grenade, *GRENADE_OFFSET)
+        self.loaded_grenade.set_hpr(0,180,0)
         self.loaded_grenade.set_scale(GRENADE_SCALE)
         inner_top = self.loaded_grenade.find('**/inner_top')
         inner_top.set_color(.2,.2,.2)
@@ -76,92 +91,212 @@ class Sack (object):
         self.grenade_loaded = False
         self.loaded_grenade.hide()
 
+class Sights (object):
+
+    def __init__(self, left_barrel, right_barrel, world):
+        self.render = world.render
+        self.physics = world.physics
+        self.world = world
+        self.left_plasma = load_model('plasma_sight.egg')
+        self.right_plasma = load_model('plasma_sight.egg')
+        self.left_plasma.reparent_to(left_barrel)
+        self.right_plasma.reparent_to(right_barrel)
+        self.left_plasma.set_r(180)
+        self.left_plasma.find("**/sight").setColor(*SIGHTS_FRIENDLY_COLOR)
+        self.right_plasma.find("**/sight").setColor(*SIGHTS_FRIENDLY_COLOR)
+
+        # inverted colors based on colors behind sights
+        self.left_plasma.setTransparency(TransparencyAttrib.MAlpha)
+        self.left_plasma.setAttrib(ColorBlendAttrib.make(ColorBlendAttrib.MInvSubtract,
+              ColorBlendAttrib.OIncomingAlpha, ColorBlendAttrib.OOne))
+        self.right_plasma.setTransparency(TransparencyAttrib.MAlpha)
+        self.right_plasma.setAttrib(ColorBlendAttrib.make(ColorBlendAttrib.MInvSubtract,
+              ColorBlendAttrib.OIncomingAlpha, ColorBlendAttrib.OOne))
+
+        # ambient light source for lighting sight shapes
+        sight_light = AmbientLight('sight_light')
+        sight_light.set_color(VBase4(1,1,1,1))
+        sight_lightnp = render.attach_new_node(sight_light)
+
+        # the following excludes the sights from z-culling (always visible)
+        self.left_plasma.set_bin("fixed", 40)
+        self.left_plasma.set_depth_test(False)
+        self.left_plasma.set_depth_write(False)
+        self.left_plasma.set_light(sight_lightnp)
+        self.right_plasma.set_bin("fixed", 40)
+        self.right_plasma.set_depth_test(False)
+        self.right_plasma.set_depth_write(False)
+        self.right_plasma.set_light(sight_lightnp)
+
+    def update(self, left_barrel, right_barrel):
+        self.do_barrel_raytest(left_barrel, self.left_plasma)
+        self.do_barrel_raytest(right_barrel, self.right_plasma)
+
+    def do_barrel_raytest(self, barrel, sight):
+        pfrom = barrel.get_pos(self.render)
+        pto = pfrom + self.render.get_relative_vector(barrel, Vec3(0,0,-60))
+        result = self.physics.ray_test_closest(pfrom, pto, MAP_COLLIDE_BIT | SOLID_COLLIDE_BIT)
+        if result.has_hit():
+            sight.set_pos(render, result.get_hit_pos())
+            obj = False
+            nodename = result.get_node().get_name()
+            try:
+                obj = self.world.objects[nodename]
+            except:
+                raise
+            hostile = getattr(obj, 'hostile', False)
+            if hostile is False:
+                self.enemy(sight)
+            else:
+                self.friend(sight)
+        else:
+            sight.set_pos(render, pto)
+
+    def friend(self, sight):
+        sight.find("**/sight").setColor(*SIGHTS_ENEMY_COLOR)
+    def enemy(self, sight):
+        sight.find("**/sight").setColor(*SIGHTS_FRIENDLY_COLOR)
+
 
 class LegBones (object):
 
-    motion = [ [ 50,  -5,  -40,  -50, 25, 38]
-             , [ 0,  -40, -10,  -10, -40, -20]
-             ]
-
-    TOP = 0
-    BOTTOM = 1
-
-    def __init__(self, render, physics, hip, foot, top, bottom):
-        self.bones = [(bone, bone.get_p(), bone.get_pos(), motions) for (bone, motions) in zip([top, bottom], self.motion)]
+    def __init__(self, render, physics, hip, foot, foot_ref, top, bottom):
         self.foot_bone = foot
+        self.foot_ref = foot_ref
+        self.foot_ref.set_hpr(self.foot_ref, 90, 0, 0)
+        self.walkfunc_target_node = self.foot_ref.attach_new_node('walkfunc_target')
+
+        #testgeom = load_model('misc/rgbCube')
+        #testgeom.setScale(.1)
+        #testgeom.reparent_to(self.walkfunc_target_node)
+
         self.top_bone = top
         self.bottom_bone = bottom
         self.hip_bone = hip
+        self.hip_rest = self.hip_bone.get_pos()
         self.is_on_ground = False
         self.render = render
         self.physics = physics
-        self.global_floor_pos = Point3(0,0,0)
         self.top_bone_target_angle = self.top_bone.get_p()
+        print "top bone angle: %s" % self.top_bone_target_angle
         self.bottom_bone_target_angle = self.bottom_bone.get_p()
+        print "bottom bone angle: %s" % self.bottom_bone_target_angle   
+        self.crouch_factor = 0
+
+        """walk sequence step varies from -WALKFUNC_STEPS to WALKFUNC_STEPS
+         with 0 being the top or bottom of the ellipse
+         depending on down or up step. -WALKFUNC_STEPS and WALKFUNC_STEPS
+         are the points of the ellipse where the incrementor
+         switches directions between up/down step. this way
+         we deal with only one potential y at any x"""
+        self.walk_seq_step = 0
+        self.up_step = False
+
+        """x input to the ellipse eq. to get y point"""
+        self.walkfunc_x = 0
+        """sizeparam varies from .001 (a tiny ellipse)
+         to 4 (full clip walking cycle ellipse)"""
+        self.walkfunc_sizeparam = MIN_WALKFUNC_SIZE_FACTOR
+        """as this value gets smaller, the length of the tilted 
+         ellipse is longer"""
+        self.walkfunc_ellipse_mag_coefficient = 37
+        """the maximum x value is when the value under
+            the sqrt sign in the walk equation is 0"""
+        self.walkfunc_x_max = math.sqrt(self.walkfunc_sizeparam / self.walkfunc_ellipse_mag_coefficient)
+
+        self.direction = 0
+
+    def _recompute_walkfunc_x(self):
+        """compute x and then proportion so that it matches 
+        current size vs the maximum size of the ellipse"""
+        self.walkfunc_x_max = math.sqrt(float(self.walkfunc_sizeparam) / float(self.walkfunc_ellipse_mag_coefficient))
+        self.walkfunc_x = (abs(self.walk_seq_step) * self.walkfunc_x_max) / (WALKFUNC_STEPS)
+        self.walkfunc_x = (self.walkfunc_x * self.walkfunc_sizeparam) / MAX_WALKFUNC_SIZE_FACTOR
+        if (self.walk_seq_step < 0):
+            self.walkfunc_x = -1 * self.walkfunc_x
+
+    def _increment_walk_seq_step(self, direction):
+        self.direction = 1 if direction > 0 else -1
+        if not (-((WALKFUNC_STEPS)) < self.walk_seq_step < ((WALKFUNC_STEPS))):
+            self.up_step = not self.up_step
+        if (self.up_step):
+            self.walk_seq_step -= 1 * self.direction
+        else:
+            self.walk_seq_step += 1 * self.direction
+        
+    def _walkfunc_upper(self, x):
+        """Defines the upper portion of the ellipse (up step)"""
+        return ((-self.direction * 15 * self.walkfunc_x) + math.sqrt(75 * ((-self.walkfunc_ellipse_mag_coefficient * math.pow(self.walkfunc_x, 2)) + self.walkfunc_sizeparam))) / 100
+       
+    def _walkfunc_lower(self, x):
+        """Defines the lower portion of the ellipse (down step)"""
+        return ((-self.direction * 15 * self.walkfunc_x) - math.sqrt(75 * ((-self.walkfunc_ellipse_mag_coefficient * math.pow(self.walkfunc_x, 2)) + self.walkfunc_sizeparam))) / 100
+       
+    def _get_target_pos(self):
+        walkfunc_y = None
+        if self.up_step:
+            walkfunc_y = self._walkfunc_upper(self.walkfunc_x)
+        else:
+            walkfunc_y = self._walkfunc_lower(self.walkfunc_x)
+        d = 1 if self.direction > 0 else -1
+        self.walkfunc_target_node.set_pos(self.foot_ref, self.walkfunc_x + d * (.03*self.walkfunc_sizeparam), walkfunc_y, 0)
+        return self.walkfunc_target_node.get_pos(self.foot_ref)
 
     def bottom_resting_pos(self):
-        return self.bones[self.BOTTOM][2]
+        return self.bones[self.BOTTOM][2] + self.crouch_factor*-50
 
     def top_resting_pos(self):
-        return self.bones[self.TOP][2]
+        return self.bones[self.TOP][2] + self.crouch_factor*-50
 
-    def get_walk_seq(self, stage, walk_cycle_speed, bob, blend_type):
-        lerps = [LerpFunc(self.update_piece, fromData=resting_p + motions[stage - 1], toData=resting_p + motions[stage], duration=walk_cycle_speed, extraArgs=[bone, idx]) for idx, (bone, resting_p, resting_pos, motions) in enumerate(self.bones)]
-        bob = LerpPosInterval(self.bones[self.TOP][0], walk_cycle_speed, self.bones[self.TOP][2] + bob)
-        lerps.append(bob)
-        return lerps
-
-    def get_return(self, return_speed):
-        lerps = [LerpFunc(self.update_piece, fromData=bone.get_p(), toData=resting_p, duration=return_speed, extraArgs=[bone, idx]) for idx, (bone, resting_p, resting_pos, motions) in enumerate(self.bones)]
-        return_pos = LerpPosInterval(self.bones[self.TOP][0], return_speed, self.bones[self.TOP][2])
-        lerps.append(return_pos)
-        return lerps
-
-    def update_piece(self, angle, bone, idx):
-        if idx is 0:
-            bone.set_p(angle)
-        else:
-            bone.set_p(angle)
-            foot_pos = self.get_floor_spot()
-            if foot_pos and self.is_on_ground:
-                hip_pos = self.hip_bone.get_pos(self.render)
-                v =  hip_pos - foot_pos
-                #print v.length()
-                self.ik_leg(v)
-
+    def update_bob(self, deltay, bone):
+        rest_pos = self.bones[self.TOP][2]
+        bone.set_pos(rest_pos.x,deltay - (self.crouch_factor * .02), rest_pos.z)
 
 
     def get_floor_spot(self):
         l_from = self.foot_bone.get_pos(self.render)
         l_to = self.foot_bone.get_pos(self.render)
         l_from.y += 1
-        l_to.y -= 1
+        l_to.y -= .7
         result = self.physics.ray_test_closest(l_from, l_to, MAP_COLLIDE_BIT | SOLID_COLLIDE_BIT)
         if result.has_hit():
-            return result.get_hit_pos()
+            return self.foot_ref.get_relative_point(self.render, result.get_hit_pos())
         else:
             return None
 
-    def ik_leg(self, target_vector):
+    def ik_leg(self):
+        floor_pos = self.get_floor_spot()
+        target_pos = self._get_target_pos()
+        hip_pos = self.hip_bone.get_pos(self.foot_ref)
+
+        if floor_pos and target_pos.y < floor_pos.y:
+            floor_pos.x = target_pos.x
+            target_vector = hip_pos - floor_pos
+            self.is_on_ground = True
+        else:
+            target_vector = hip_pos - target_pos
+            self.is_on_ground = False
+
+        #turn off the ground for debugging
+        #target_vector = hip_pos - target_pos
+
         pt_length = target_vector.length()
-        if .2 < pt_length < (TOP_LEG_LENGTH + BOTTOM_LEG_LENGTH):
-            tt_angle_cos = ((TOP_LEG_LENGTH**2)+(pt_length**2)-(BOTTOM_LEG_LENGTH**2))/(2*TOP_LEG_LENGTH*pt_length)
-            target_top_angle = rad2Deg(math.acos(tt_angle_cos))
-            if target_top_angle and target_top_angle == target_top_angle and -120 < target_top_angle < 100:
-                rot_mx = Mat3.rotateMatNormaxis(-target_top_angle, render.getRelativeVector(self.top_bone, Vec3.unitX()))
-                pk_prime = rot_mx.xformVec(target_vector)
-                target_vector.normalize()
-                alter_angle = target_vector.dot(pk_prime)
-                #print alter_angle
-                self.top_bone.set_p(self.top_bone, alter_angle)
-            tb_angle_cos = (((TOP_LEG_LENGTH**2) + (BOTTOM_LEG_LENGTH**2) - pt_length**2)/(2*TOP_LEG_LENGTH*BOTTOM_LEG_LENGTH))
+        if .01 < pt_length < (TOP_LEG_LENGTH + BOTTOM_LEG_LENGTH +.1):
+            tt_angle_cos = (math.pow(TOP_LEG_LENGTH, 2) + math.pow(pt_length, 2) - math.pow(BOTTOM_LEG_LENGTH,2))/(2*TOP_LEG_LENGTH*pt_length)
+            try:
+                target_top_angle = rad2Deg(math.acos(tt_angle_cos))
+            except ValueError:
+                return
+            target_vector.normalize()
+            self.hip_bone.get_relative_vector(self.foot_ref, target_vector)
+            delta = target_vector.get_xy().signed_angle_deg(Vec3.unitY().get_xy())
+            self.top_bone.set_p(90 - target_top_angle + delta)
+
+            tb_angle_cos = ((math.pow(TOP_LEG_LENGTH, 2) + math.pow(BOTTOM_LEG_LENGTH, 2) - math.pow(pt_length,2))/(2*TOP_LEG_LENGTH*BOTTOM_LEG_LENGTH))
             target_bottom_angle = rad2Deg(math.acos(tb_angle_cos))
-            if target_bottom_angle and target_bottom_angle == target_bottom_angle and -140 < target_bottom_angle < 140:
-                self.bottom_bone.set_p((180 - target_bottom_angle)*-1)
+            self.bottom_bone.set_p((180 - target_bottom_angle) * -1)
         else:
             return
-
-
 
 class Skeleton (object):
 
@@ -175,48 +310,20 @@ class Skeleton (object):
         self.left_leg = left_leg
         self.right_leg = right_leg
         self.shoulder = shoulder
-        self.resting = [self.shoulder.get_pos(), self.left_leg.top_resting_pos(), self.right_leg.top_resting_pos()] # :/
-        self.walk_seq = self._make_walk_seq_()
-        self.return_seq = self._make_return_seq_()
+        self.crouch_factor = 0
+        self.resting = self.shoulder.get_pos()
+        #self.return_seq = self._make_return_seq_()
         self.walk_playing = False
+        self.lf_sound_played = False
+        self.rf_sound_played = False
 
-    def _make_walk_seq_(self):
-        ws = self.walk_cycle_speed / 6.0
-        up_interval = [LerpPosInterval(self.shoulder, ws, self.resting[0] + self.upbob)]
-        down_interval = [LerpPosInterval(self.shoulder, ws, self.resting[0] + self.downbob)]
-        left_leg_on_ground = [LerpFunc(self._left_leg_on_ground)]
-        right_leg_on_ground = [LerpFunc(self._right_leg_on_ground)]
-        steps = [ self.right_leg.get_walk_seq(0,ws, self.upbob, 'easeIn') + self.left_leg.get_walk_seq(4,ws, self.upbob, 'easeOut') + up_interval + right_leg_on_ground
-                , self.right_leg.get_walk_seq(1,ws, self.upbob, 'easeIn') + self.left_leg.get_walk_seq(5,ws, self.upbob, 'easeOut') + down_interval + right_leg_on_ground
-                , self.right_leg.get_walk_seq(2,ws, self.upbob, 'easeIn') + self.left_leg.get_walk_seq(0,ws,self.upbob, 'easeOut') + up_interval + left_leg_on_ground
-                , self.right_leg.get_walk_seq(3,ws, self.downbob, 'easeOut') + self.left_leg.get_walk_seq(1,ws,self.downbob, 'easeIn') + down_interval + left_leg_on_ground
-                , self.right_leg.get_walk_seq(4,ws, self.downbob, 'easeOut') + self.left_leg.get_walk_seq(2,ws,self.downbob, 'easeIn') + left_leg_on_ground
-                , self.right_leg.get_walk_seq(5,ws, self.downbob, 'easeOut') + self.left_leg.get_walk_seq(3,ws,self.downbob, 'easeIn') + right_leg_on_ground
-                ]
-        steps = [Parallel(*step) for step in steps]
-        return Sequence(*steps)
 
-    def _left_leg_on_ground(self, data):
-        if not self.left_leg.is_on_ground:
-            self.lf_sound.play()
-        self.left_leg.is_on_ground = True
-        self.right_leg.is_on_ground = False
-
-    def _right_leg_on_ground(self, data):
-        if not self.right_leg.is_on_ground:
-            self.rf_sound.play()
-        self.left_leg.is_on_ground = False
-        self.right_leg.is_on_ground = True
+    def _move_shoulder(self, data, shoulder):
+        shoulder.set_pos(self.resting.x, data - (self.crouch_factor * .8), self.resting.z)
 
     def _make_return_seq_(self):
         lerps = self.right_leg.get_return(self.return_speed) + self.left_leg.get_return(self.return_speed)
-        lerps.append(LerpPosInterval(self.shoulder, self.return_speed, self.resting[0], bakeInStart=0))
         return Parallel(*lerps)
-
-    def walk(self):
-        if not self.walk_playing:
-            self.walk_playing = True
-            self.walk_seq.loop()
 
     def stop(self):
         if self.walk_playing:
@@ -225,7 +332,6 @@ class Skeleton (object):
             self.left_leg.is_on_ground = True
             self.right_leg.is_on_ground = True
             Sequence(self.return_seq).start()
-        #Parallel(LerpFunc(self.left_leg.ik_leg), LerpFunc(self.right_leg.ik_leg)).start()
 
     def setup_footsteps(self, audio3d):
         if audio3d is not None:
@@ -239,25 +345,41 @@ class Skeleton (object):
             self.rf_played_since = 0
 
     def update_legs(self, walk, dt, render, physics):
+        if self.crouch_factor > 0:
+            self.left_leg.crouch_factor = self.crouch_factor
+            self.right_leg.crouch_factor = self.crouch_factor
+            self.shoulder.set_pos(self.resting.x, self.resting.y - self.crouch_factor * .8, self.resting.z)
         if walk != 0:
-            self.walk()
+            #self.walk()
+            self.left_leg.up_step = not self.right_leg.up_step
+            for leg in [self.left_leg, self.right_leg]:
+                leg.walkfunc_sizeparam = MAX_WALKFUNC_SIZE_FACTOR
+                leg._increment_walk_seq_step(walk)
+                leg._recompute_walkfunc_x()
+                leg.ik_leg()
+            if self.left_leg.is_on_ground and not self.lf_sound_played:
+                self.lf_sound.play()
+                self.lf_sound_played = True
+            if not self.left_leg.is_on_ground:
+                self.lf_sound_played = False
+            if self.right_leg.is_on_ground and not self.rf_sound_played:
+                self.rf_sound.play()
+                self.rf_sound_played = True
+            if not self.right_leg.is_on_ground:
+                self.rf_sound_played = False
         else:
             self.stop()
-
-        #if self.left_leg.is_on_ground:
-        #    self.left_leg.update_leg()
-
-        #if self.right_leg.is_on_ground:
-        #    self.right_leg.update_leg()
-
-
+            for leg in [self.left_leg, self.right_leg]:
+                leg.walkfunc_sizeparam = .001
+                leg._recompute_walkfunc_x()
+                leg.ik_leg()
 
 
 class Walker (PhysicalObject):
 
     collide_bits = SOLID_COLLIDE_BIT
 
-    def __init__(self, incarnator, colordict=None):
+    def __init__(self, incarnator, colordict=None, player=False):
         super(Walker, self).__init__()
         self.spawn_point = incarnator
         self.on_ground = False
@@ -286,6 +408,10 @@ class Walker (PhysicalObject):
         self.right_gun_charge = 1.0
         self.primary_color = [1,1,1,1]
         self.colordict = colordict if colordict else None
+        self.crouching = False
+        self.player = player
+        self.can_jump = False
+        self.crouch_impulse = 0
 
     def get_model_part(self, obj_name):
         return self.actor.find("**/%s" % obj_name)
@@ -294,8 +420,6 @@ class Walker (PhysicalObject):
         self.actor = Actor('walker.egg')
         if self.colordict:
             self.setup_color(self.colordict)
-        self.loaded_missile = Hat(self.actor, self.primary_color)
-        self.loaded_grenade = Sack(self.actor, self.primary_color)
         self.actor.set_pos(*self.spawn_point.pos)
         self.actor.look_at(*self.spawn_point.heading)
         self.spawn_point.was_used()
@@ -303,6 +427,7 @@ class Walker (PhysicalObject):
 
         self.left_barrel_joint = self.actor.exposeJoint(None, 'modelRoot', 'left_barrel_bone')
         self.right_barrel_joint = self.actor.exposeJoint(None, 'modelRoot', 'right_barrel_bone')
+
         return self.actor
 
     def create_solid(self):
@@ -357,21 +482,42 @@ class Walker (PhysicalObject):
         self.integrator = Integrator(self.world.gravity)
         self.world.register_collider(self)
         self.world.register_updater(self)
+
+        pelvis_bone = self.actor.controlJoint(None, 'modelRoot', 'pelvis_bone')
+
+        left_foot_bone = self.actor.exposeJoint(None, 'modelRoot', 'left_foot_bone')
+        left_foot_bone_origin_ref = self.actor.attach_new_node("left_foot_reference")
+        left_foot_bone_origin_ref.set_pos(left_foot_bone.get_pos())
+        #pelvis_bone.attach_new_node(left_foot_bone_origin_ref)
+
+        right_foot_bone = self.actor.exposeJoint(None, 'modelRoot', 'right_foot_bone')
+        right_foot_bone_origin_ref = self.actor.attach_new_node("right_foot_reference")
+        right_foot_bone_origin_ref.set_pos(right_foot_bone.get_pos())
+        #pelvis_bone.attach_new_node(right_foot_bone_origin_ref)
+
         left_bones = LegBones(
             self.world.render, self.world.physics,
             self.actor.exposeJoint(None, 'modelRoot', 'left_hip_bone'),
-            self.actor.exposeJoint(None, 'modelRoot', 'left_foot_bone'),
+            left_foot_bone,
+            left_foot_bone_origin_ref,
             *[self.actor.controlJoint(None, 'modelRoot', name) for name in ['left_top_bone', 'left_bottom_bone']]
         )
         right_bones = LegBones(
             self.world.render, self.world.physics,
             self.actor.exposeJoint(None, 'modelRoot', 'right_hip_bone'),
-            self.actor.exposeJoint(None, 'modelRoot', 'right_foot_bone'),
+            right_foot_bone,
+            right_foot_bone_origin_ref,
             *[self.actor.controlJoint(None, 'modelRoot', name) for name in  ['right_top_bone', 'right_bottom_bone']]
         )
 
-        self.skeleton = Skeleton(left_bones, right_bones, self.actor.controlJoint(None, 'modelRoot', 'head_bone'))
+        self.skeleton = Skeleton(left_bones, right_bones, pelvis_bone)
         self.skeleton.setup_footsteps(self.world.audio3d)
+        self.head_bone = self.actor.controlJoint(None, 'modelRoot', 'head_bone')
+        self.head_bone_joint = self.actor.exposeJoint(None, 'modelRoot', 'head_bone')
+        self.loaded_missile = LoadedMissile(self.head_bone_joint, self.primary_color)
+        self.loaded_grenade = LoadedGrenade(self.head_bone_joint, self.primary_color)
+        if self.player:
+            self.sights = Sights(self.left_barrel_joint, self.right_barrel_joint, self.world)
 
 
 
@@ -380,8 +526,14 @@ class Walker (PhysicalObject):
         print self, 'HIT BY', other, 'AT', world_pt
 
     def handle_command(self, cmd, pressed):
-        if cmd is 'crouch' and not pressed and self.on_ground:
+        if cmd is 'crouch' and pressed:
+            self.crouching = True
+            if self.on_ground:
+                self.can_jump = True
+        if cmd is 'crouch' and not pressed and self.on_ground and self.can_jump:
+            self.crouching = False
             self.y_velocity = Vec3(0, 6.8, 0)
+            self.can_jump = False
         if cmd is 'fire' and pressed:
             self.handle_fire()
             return
@@ -449,6 +601,9 @@ class Walker (PhysicalObject):
         else:
             friction = AIR_FRICTION
 
+        #to debug walk cycle (stay in place)
+        #riction = 0
+
         speed = walk
         pos = self.position()
         self.move_by(0, 0, speed)
@@ -461,19 +616,31 @@ class Walker (PhysicalObject):
         pt_to = pt_from + Vec3(0, -1.1, 0)
         result = self.world.physics.ray_test_closest(pt_from, pt_to, MAP_COLLIDE_BIT | SOLID_COLLIDE_BIT)
 
-        #this should return 'on ground' information
+        # this should return 'on ground' information
         self.skeleton.update_legs(walk, dt, self.world.render, self.world.physics)
 
         if self.y_velocity.get_y() <= 0 and result.has_hit():
             self.on_ground = True
+            self.crouch_impulse = self.y_velocity.y
             self.y_velocity = Vec3(0, 0, 0)
             self.move(result.get_hit_pos())
+            self.skeleton.left_leg_on_ground = True
+            self.skeleton.right_leg_on_ground = True
         else:
             self.on_ground = False
             current_y = Point3(0, self.position().get_y(), 0)
             y, self.y_velocity = self.integrator.integrate(current_y, self.y_velocity, dt)
-
             self.move(self.position() + (y - current_y))
+
+        if self.crouching and self.skeleton.crouch_factor < 1:
+            self.skeleton.crouch_factor += (dt*60)/10
+            self.skeleton.update_legs(0, dt, self.world.render, self.world.physics)
+        elif not self.crouching and self.skeleton.crouch_factor > 0:
+            self.skeleton.crouch_factor -= (dt*60)/10
+            self.skeleton.update_legs(0, dt, self.world.render, self.world.physics)
+
+        #if self.crouch_impulse < 0:
+
         goal = self.position()
         adj_dist = abs((start - goal).length())
         new_pos_ts = TransformState.make_pos(self.position() + self.head_height)
@@ -505,6 +672,9 @@ class Walker (PhysicalObject):
 
         if self.energy < 1:
             self.energy += WALKER_RECHARGE_FACTOR * (dt)
+
+        if self.player:
+            self.sights.update(self.left_barrel_joint, self.right_barrel_joint)
 
 
 
